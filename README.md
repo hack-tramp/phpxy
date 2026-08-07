@@ -4,4 +4,4 @@
 
 **How to use** 
 
-For these scripts to work you will need to place them on a server in a country which does not restrict access to the site you want (e.g. EZTV).
+For these scripts to work you will need to place them on a server in a country which does not restrict access to the site you want (e.g. EZTV). For example, using a free account with infinityfree.com works since it provides a PHP server in the USA.
