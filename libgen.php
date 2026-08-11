@@ -91,105 +91,128 @@ class LibgenProxy {
         
         return false;
     }
+    
     /**
- * Stream a file directly to the browser
- */
-public function streamFile($md5, $extension = '') {
-    // Get the actual download URL
-    $downloadUrl = $this->getDownloadUrl($md5);
-    
-    if (!$downloadUrl) {
-        http_response_code(404);
-        echo "Could not find download link for this file";
-        return false;
-    }
-    
-    // Clear any output buffers
-    while (ob_get_level()) {
-        ob_end_clean();
-    }
-    
-    // Now stream the file
-    $ch = curl_init();
-    
-    $content_type = '';
-    $content_disposition = '';
-    $content_length = '';
-    $http_code = 0;
-    
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $downloadUrl,
-        CURLOPT_RETURNTRANSFER => false,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        CURLOPT_TIMEOUT => 300,
-        CURLOPT_REFERER => $this->baseUrl,
-        CURLOPT_ENCODING => '',
-        CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$content_type, &$content_disposition, &$content_length, &$http_code) {
-            $len = strlen($header);
-            if (preg_match('/^HTTP\/\d\.\d\s+(\d+)/', $header, $matches)) {
-                $http_code = intval($matches[1]);
-            }
-            $header = explode(':', $header, 2);
-            if (count($header) < 2) return $len;
-            
-            $name = strtolower(trim($header[0]));
-            $value = trim($header[1]);
-            
-            if ($name === 'content-type') {
-                $content_type = $value;
-            } elseif ($name === 'content-disposition') {
-                $content_disposition = $value;
-            } elseif ($name === 'content-length') {
-                $content_length = $value;
-            }
-            
-            return $len;
-        },
-        CURLOPT_WRITEFUNCTION => function($curl, $data) {
-            echo $data;
-            return strlen($data);
+     * Stream a file directly to the browser
+     */
+    public function streamFile($md5, $extension = '', $title = '') {
+        // Get the actual download URL
+        $downloadUrl = $this->getDownloadUrl($md5);
+        
+        if (!$downloadUrl) {
+            http_response_code(404);
+            echo "Could not find download link for this file";
+            return false;
         }
-    ]);
-    
-    // Build filename with the extension we got from search results
-    $filename = 'book_' . $md5;
-    if (!empty($extension)) {
-        $filename .= '.' . $extension;
+        
+        // Clear any output buffers
+        while (ob_get_level()) {
+            ob_end_clean();
+        }
+        
+        // Now stream the file
+        $ch = curl_init();
+        
+        $content_type = '';
+        $content_disposition = '';
+        $content_length = '';
+        $http_code = 0;
+        $filename_from_header = '';
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $downloadUrl,
+            CURLOPT_RETURNTRANSFER => false,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            CURLOPT_TIMEOUT => 300,
+            CURLOPT_REFERER => $this->baseUrl,
+            CURLOPT_ENCODING => '',
+            CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$content_type, &$content_disposition, &$content_length, &$http_code, &$filename_from_header) {
+                $len = strlen($header);
+                if (preg_match('/^HTTP\/\d\.\d\s+(\d+)/', $header, $matches)) {
+                    $http_code = intval($matches[1]);
+                }
+                $header = explode(':', $header, 2);
+                if (count($header) < 2) return $len;
+                
+                $name = strtolower(trim($header[0]));
+                $value = trim($header[1]);
+                
+                if ($name === 'content-type') {
+                    $content_type = $value;
+                } elseif ($name === 'content-disposition') {
+                    $content_disposition = $value;
+                    if (preg_match('/filename="?([^"]+)"?/', $content_disposition, $filenameMatch)) {
+                        $filename_from_header = $filenameMatch[1];
+                    }
+                } elseif ($name === 'content-length') {
+                    $content_length = $value;
+                }
+                
+                return $len;
+            },
+            CURLOPT_WRITEFUNCTION => function($curl, $data) {
+                echo $data;
+                return strlen($data);
+            }
+        ]);
+        
+        // Build filename: use title if available, otherwise use md5
+        if (!empty($title)) {
+            // Sanitize: remove invalid filename characters
+            $filename = preg_replace('/[\\/\\:*?"<>|]/', '', $title);
+            // Replace spaces with underscores
+            $filename = str_replace(' ', '_', $filename);
+            // Truncate to 50 characters
+            if (strlen($filename) > 50) {
+                $filename = substr($filename, 0, 50);
+            }
+            // Remove trailing underscores
+            $filename = rtrim($filename, '_');
+            // Add extension
+            if (!empty($extension)) {
+                $filename .= '.' . $extension;
+            }
+        } else {
+            // Fallback to md5 if no title
+            $filename = 'book_' . $md5;
+            if (!empty($extension)) {
+                $filename .= '.' . $extension;
+            }
+        }
+        
+        // Set headers before starting output
+        if ($content_disposition) {
+            $content_disposition = preg_replace('/filename="?[^"]+"?/', 'filename="' . $filename . '"', $content_disposition);
+            header('Content-Disposition: ' . $content_disposition);
+        } else {
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+        }
+        
+        if ($content_type) {
+            header('Content-Type: ' . $content_type);
+        } else {
+            header('Content-Type: application/octet-stream');
+        }
+        
+        if ($content_length) {
+            header('Content-Length: ' . $content_length);
+        }
+        
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        
+        curl_close($ch);
+        
+        if ($error) {
+            echo "Download failed: " . $error;
+            return false;
+        }
+        
+        return true;
     }
     
-    // Set headers before starting output
-    if ($content_disposition) {
-        // Replace filename in content-disposition
-        $content_disposition = preg_replace('/filename="?[^"]+"?/', 'filename="' . $filename . '"', $content_disposition);
-        header('Content-Disposition: ' . $content_disposition);
-    } else {
-        header('Content-Disposition: attachment; filename="' . $filename . '"');
-    }
-    
-    if ($content_type) {
-        header('Content-Type: ' . $content_type);
-    } else {
-        header('Content-Type: application/octet-stream');
-    }
-    
-    if ($content_length) {
-        header('Content-Length: ' . $content_length);
-    }
-    
-    $result = curl_exec($ch);
-    $error = curl_error($ch);
-    
-    curl_close($ch);
-    
-    if ($error) {
-        echo "Download failed: " . $error;
-        return false;
-    }
-    
-    return true;
-}
     private function fetchPage($url) {
         $ch = curl_init();
         curl_setopt_array($ch, [
@@ -308,7 +331,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     if (isset($_GET['download']) && isset($_GET['md5']) && strlen($_GET['md5']) === 32) {
         $md5 = $_GET['md5'];
         $extension = isset($_GET['ext']) ? $_GET['ext'] : '';
-        $proxy->streamFile($md5, $extension);
+        $title = isset($_GET['title']) ? $_GET['title'] : '';
+        $proxy->streamFile($md5, $extension, $title);
         exit;
     }
     
@@ -335,6 +359,8 @@ function displaySearchForm() {
 <!DOCTYPE html>
 <html>
 <head>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>Library Genesis Proxy</title>
     <style>
         * { box-sizing: border-box; }
@@ -352,7 +378,25 @@ function displaySearchForm() {
         .feature .icon { font-size: 28px; display: block; margin-bottom: 8px; }
         .feature strong { display: block; color: #333; font-size: 14px; }
         .feature span { font-size: 13px; color: #666; }
-        @media (max-width: 600px) { .search-box { flex-direction: column; } .container { padding: 20px; } }
+@media (max-width: 600px) { 
+    body { font-size: 16px; }
+    .container { padding: 15px; }
+    .search-box { flex-direction: column; } 
+    .search-box input[type="text"] { font-size: 16px; padding: 12px; }
+    .search-box button { font-size: 16px; padding: 12px; }
+    .header { flex-direction: column; align-items: flex-start; } 
+    .header-actions { width: 100%; } 
+    .header-actions .btn { flex: 1; text-align: center; font-size: 14px; } 
+    .book-title { font-size: 16px; } 
+    .book-author { font-size: 14px; } 
+    .book-meta { flex-direction: column; gap: 3px; font-size: 13px; } 
+    .book-meta span { display: block; } 
+    .book-actions { flex-direction: column; } 
+    .book-actions .btn { width: 100%; text-align: center; font-size: 16px; padding: 12px; } 
+    .features { grid-template-columns: 1fr; }
+    h1 { font-size: 24px; }
+    .subtitle { font-size: 14px; }
+}
     </style>
 </head>
 <body>
@@ -379,6 +423,7 @@ function displayResults($results, $query) {
 <!DOCTYPE html>
 <html>
 <head>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Search Results - Library Genesis Proxy</title>
     <style>
         * { box-sizing: border-box; }
@@ -405,7 +450,15 @@ function displayResults($results, $query) {
         .book-meta .label { font-weight: 600; color: #333; }
         .book-actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .badge-format { display: inline-block; padding: 2px 10px; background: #e3f2fd; border-radius: 4px; font-size: 12px; color: #0d47a1; }
-        @media (max-width: 600px) { .header { flex-direction: column; align-items: flex-start; } .header-actions { width: 100%; } .header-actions .btn { flex: 1; text-align: center; } }
+        @media (max-width: 600px) { 
+            .header { flex-direction: column; align-items: flex-start; } 
+            .header-actions { width: 100%; } 
+            .header-actions .btn { flex: 1; text-align: center; } 
+            .book-meta { flex-direction: column; gap: 3px; } 
+            .book-meta span { display: block; } 
+            .book-actions { flex-direction: column; } 
+            .book-actions .btn { width: 100%; text-align: center; } 
+        }
     </style>
 </head>
 <body>
@@ -445,7 +498,7 @@ function displayResults($results, $query) {
                     </div>
                     <div class="book-actions">
                         <?php if (!empty($book['md5'])): ?>
-                            <a href="?download&md5=<?php echo htmlspecialchars($book['md5']); ?>&ext=<?php echo htmlspecialchars($book['extension']); ?>" class="btn btn-success">📥 Download</a>
+                            <a href="?download&md5=<?php echo htmlspecialchars($book['md5']); ?>&ext=<?php echo htmlspecialchars($book['extension']); ?>&title=<?php echo urlencode($book['title']); ?>" class="btn btn-success">📥 Download</a>
                         <?php endif; ?>
                     </div>
                 </div>
