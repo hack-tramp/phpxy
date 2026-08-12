@@ -5,6 +5,7 @@
 **LibGen** - This lets you find and download books from libgen.li. The downloading isn't great - with PDF it seems like it hangs because it wont show you progress in the browser, you just need to wait and it will finish. With other formats like EPUB and MOBI at least you should see how much data has been downloaded so far.
 
 **News sites**
+
 Each site has it's own php file. I'm focusing on the main news sites and only on text (no video or images). So far the following sites have been implemented:
 aljz.php - Al Jazeera
 
