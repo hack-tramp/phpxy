@@ -7,7 +7,8 @@
 **News sites**
 
 Each site has it's own php file. I'm focusing on the main news sites and only on text (no video or images). So far the following sites have been implemented:
-aljz.php - Al Jazeera
+
+**aljz.php - Al Jazeera**
 
 **How to use** 
 
