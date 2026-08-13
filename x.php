@@ -40,7 +40,7 @@ function fetchProfile($username) {
     
     // Check cache (1 hour TTL)
     $cache_file = $cache_dir . md5($username) . '.json';
-    if (file_exists($cache_file) && (time() - filemtime($cache_file) < 3600)) {
+    if (file_exists($cache_file) && (time() - filemtime($cache_file) < 0)) {
         return json_decode(file_get_contents($cache_file), true);
     }
     
@@ -69,7 +69,7 @@ function fetchProfile($username) {
     if ($error) return ['error' => "CURL error: $error"];
     if (empty($html)) return ['error' => 'No content received'];
     
-    // Parse the HTML - using the same method that worked in my first response
+    // Parse the HTML
     $data = parseTwitterHTML($html, $username);
     
     // Cache the result
@@ -80,7 +80,23 @@ function fetchProfile($username) {
     return $data;
 }
 
-// Parse Twitter/X HTML - THIS IS THE METHOD THAT WORKED IN MY FIRST RESPONSE
+// Helper function to extract meta values - handles both attribute orders
+function extractMetaValue($html, $property) {
+    $pattern1 = '/<meta\b[^>]*\bitemProp=["\']' . preg_quote($property, '/') . '["\'][^>]*\bcontent=["\'](.*?)["\'][^>]*>/is';
+    $pattern2 = '/<meta\b[^>]*\bcontent=["\'](.*?)["\'][^>]*\bitemProp=["\']' . preg_quote($property, '/') . '["\'][^>]*>/is';
+
+    if (preg_match($pattern1, $html, $m)) {
+        return html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    }
+
+    if (preg_match($pattern2, $html, $m)) {
+        return html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    }
+
+    return '';
+}
+
+// Parse Twitter/X HTML using schema.org metadata
 function parseTwitterHTML($html, $username) {
     $data = [
         'username' => $username,
@@ -98,21 +114,27 @@ function parseTwitterHTML($html, $username) {
         'error' => null
     ];
     
-    // Extract profile info using regex patterns - same as first response
+    // Extract profile info using regex patterns
     
-    // Name
+    // Name - from og:title or title tag
     if (preg_match('/<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
         $data['name'] = trim(str_replace(['(@' . $username . ')', ' on X'], '', $matches[1]));
+    } elseif (preg_match('/<title>([^<]+)<\/title>/', $html, $matches)) {
+        $data['name'] = trim(str_replace(['(@' . $username . ')', ' / X'], '', $matches[1]));
     }
     
-    // Bio
+    // Bio/Description
     if (preg_match('/<meta\s+name=["\']description["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
+        $data['bio'] = html_entity_decode(trim($matches[1]));
+    } elseif (preg_match('/<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
         $data['bio'] = html_entity_decode(trim($matches[1]));
     }
     
     // Avatar
     if (preg_match('/<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+_200x200[^"\']*)["\']/i', $html, $matches)) {
         $data['avatar'] = str_replace('_200x200', '_400x400', $matches[1]);
+    } elseif (preg_match('/<img[^>]+src=["\']([^"\']+_400x400[^"\']*)["\']/i', $html, $matches)) {
+        $data['avatar'] = $matches[1];
     }
     
     // Banner
@@ -125,7 +147,7 @@ function parseTwitterHTML($html, $username) {
         $data['location'] = trim($matches[1]);
     }
     
-    // URL
+    // URL/Website
     if (preg_match('/<svg[^>]*icon-link[^>]*>.*?<\/svg>\s*<a[^>]+href=["\']([^"\']+)["\'][^>]*>/s', $html, $matches)) {
         $data['url'] = $matches[1];
     }
@@ -135,7 +157,7 @@ function parseTwitterHTML($html, $username) {
         $data['joined'] = trim($matches[1]);
     }
     
-    // Stats from meta
+    // Extract stats from meta tags
     if (preg_match('/<meta\s+name=["\']twitter:data1["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
         $data['posts'] = parseCount($matches[1]);
     }
@@ -151,109 +173,119 @@ function parseTwitterHTML($html, $username) {
         $data['posts'] = (int)$matches[1];
     }
     
-    // Extract tweets - EXACTLY THE SAME METHOD FROM MY FIRST RESPONSE
+    // Extract tweets using schema.org metadata
     $tweets = [];
     $seen_texts = [];
+   // Extract tweets - FIXED VERSION// Extract tweets - FIXED for full text
+if (preg_match_all('/<article[^>]*data-tweet-id=["\']([^"\']+)["\'][^>]*>(.*?)<\/article>/s', $html, $matches, PREG_SET_ORDER)) {
+    foreach ($matches as $match) {
+        $tweet_id = $match[1];
+        $tweet_html = $match[0];
+        
+        // Extract FULL text from note_tweet first
+        $text = '';
+        
+        // Method 1: Get full text from note_tweet
+        if (preg_match('/"note_text":"((?:\\\\.|[^"\\\\])*)"/s', $tweet_html, $text_match)) {
+            $text = str_replace(['\\n', '\\"', '\\u0026', '\\u2019', '\\u201c', '\\u201d', '\\u002F'], ["\n", '"', '&', "'", '"', '"', '/'], $text_match[1]);
+        }
+        // Method 2: Get full_text from JSON
+        elseif (preg_match('/"full_text":"([^"]+)"/', $tweet_html, $text_match)) {
+            $text = str_replace(['\\n', '\\"', '\\u0026', '\\u2019', '\\u201c', '\\u201d', '\\u002F'], ["\n", '"', '&', "'", '"', '"', '/'], $text_match[1]);
+        }
+        // Method 3: Fallback to articleBody
+        else {
+            if (preg_match('/<meta\s+content="([^"]*)"\s+itemProp="articleBody"/i', $tweet_html, $text_match)) {
+                $text = html_entity_decode($text_match[1], ENT_QUOTES, 'UTF-8');
+            }
+        }
+        
+        if (empty($text)) continue;
+        
+        // Extract date
+        $date = '';
+        $timestamp = 0;
+        if (preg_match('/<meta\s+content="([^"]*)"\s+itemProp="datePublished"/i', $tweet_html, $date_match)) {
+            $timestamp = strtotime($date_match[1]);
+            if ($timestamp !== false && $timestamp > 0) {
+                $date = date('M j, Y g:i A', $timestamp);
+            }
+        }
+        
+        // Extract stats
+        $likes = 0; $replies = 0; $retweets = 0; $views = 0;
+        
+        // From JSON
+        if (preg_match('/"favorite_count":(\d+)/', $tweet_html, $stats_match)) {
+            $likes = (int)$stats_match[1];
+        }
+        if (preg_match('/"reply_count":(\d+)/', $tweet_html, $stats_match)) {
+            $replies = (int)$stats_match[1];
+        }
+        if (preg_match('/"retweet_count":(\d+)/', $tweet_html, $stats_match)) {
+            $retweets = (int)$stats_match[1];
+        }
+        if (preg_match('/"view_count":"?(\d+)"?/', $tweet_html, $stats_match)) {
+            $views = (int)$stats_match[1];
+        }
+        
+        // Check if pinned
+        $is_pinned = strpos($tweet_html, 'Pinned') !== false || 
+                    strpos($tweet_html, '"context_type":"Pin"') !== false;
+        
+        $tweets[] = [
+            'id' => $tweet_id,
+            'text' => $text,
+            'url' => "https://x.com/{$username}/status/{$tweet_id}",
+            'date' => $date ?: 'Recent',
+            'timestamp' => $timestamp,
+            'likes' => $likes,
+            'replies' => $replies,
+            'retweets' => $retweets,
+            'views' => $views,
+            'is_pinned' => $is_pinned,
+            'has_image' => false,
+            'has_video' => false
+        ];
+    }
+}
     
-    // Find article tags with data-tweet-id - just like I did in the first response
-    if (preg_match_all('/<article[^>]*data-tweet-id=["\']([^"\']+)["\'][^>]*>(.*?)<\/article>/s', $html, $matches, PREG_SET_ORDER)) {
-        foreach ($matches as $match) {
-            $tweet_id = $match[1];
-            $tweet_html = $match[0];
+    // If no tweets from HTML, try JSON fallback
+    if (empty($tweets)) {
+        if (preg_match_all('/"full_text":"([^"]+)"/', $html, $matches)) {
+            preg_match_all('/"created_at":"([^"]+)"/', $html, $date_matches);
+            preg_match_all('/"favorite_count":(\d+)/', $html, $like_matches);
+            preg_match_all('/"reply_count":(\d+)/', $html, $reply_matches);
+            preg_match_all('/"retweet_count":(\d+)/', $html, $retweet_matches);
             
-            // Extract text - using the same method that worked
-            $text = '';
-            
-            // Look for note_tweet text (this is where the full text lives)
-            if (preg_match('/"text":"([^"]+)"/', $tweet_html, $text_match)) {
-                $text = str_replace(['\\n', '\\"', '\\u0026', '\\u2019', '\\u201c', '\\u201d'], ["\n", '"', '&', "'", '"', '"'], $text_match[1]);
-            }
-            // Fallback to full_text
-            elseif (preg_match('/"full_text":"([^"]+)"/', $tweet_html, $text_match)) {
-                $text = str_replace(['\\n', '\\"', '\\u0026', '\\u2019', '\\u201c', '\\u201d'], ["\n", '"', '&', "'", '"', '"'], $text_match[1]);
-            }
-            // Fallback to HTML text
-            elseif (preg_match('/<div[^>]*dir=["\']auto["\'][^>]*>(.*?)<\/div>/s', $match[2], $text_match)) {
-                $text = trim(strip_tags(html_entity_decode($text_match[1])));
-            }
-            
-            if (empty($text) || strlen($text) < 5) continue;
-            
-            // Check if pinned
-            $is_pinned = strpos($tweet_html, 'Pinned') !== false || 
-                        strpos($tweet_html, 'pin-fill') !== false || 
-                        strpos($tweet_html, 'pinned_tweets') !== false ||
-                        strpos($tweet_html, '"context_type":"Pin"') !== false;
-            
-            // Extract date - THE SAME METHOD THAT WORKED
-            $date = '';
-            $timestamp = 0;
-            
-            // Look for time tag with datetime
-            if (preg_match('/<time[^>]*datetime=["\']([^"\']+)["\']/i', $tweet_html, $date_match)) {
-                $timestamp = strtotime($date_match[1]);
-                if ($timestamp !== false && $timestamp > 0) {
-                    $date = date('M j, Y g:i A', $timestamp);
+            foreach ($matches[1] as $i => $text) {
+                if (strlen($text) > 20) {
+                    $date = 'Recent';
+                    $timestamp = 0;
+                    if (isset($date_matches[1][$i])) {
+                        $ts = strtotime($date_matches[1][$i]);
+                        if ($ts !== false && $ts > 0) {
+                            $timestamp = $ts;
+                            $date = date('M j, Y g:i A', $ts);
+                        }
+                    }
+                    
+                    $tweets[] = [
+                        'id' => 'json_' . ($i + 1),
+                        'text' => str_replace(['\\n', '\\"', '\\u0026', '\\u2019'], ["\n", '"', '&', "'"], $text),
+                        'url' => "https://x.com/{$username}",
+                        'date' => $date,
+                        'timestamp' => $timestamp,
+                        'likes' => isset($like_matches[1][$i]) ? (int)$like_matches[1][$i] : 0,
+                        'replies' => isset($reply_matches[1][$i]) ? (int)$reply_matches[1][$i] : 0,
+                        'retweets' => isset($retweet_matches[1][$i]) ? (int)$retweet_matches[1][$i] : 0,
+                        'views' => 0,
+                        'is_pinned' => false,
+                        'has_image' => false,
+                        'has_video' => false
+                    ];
                 }
             }
-            
-            // If no date found, try the link text
-            if (empty($date)) {
-                if (preg_match('/<a[^>]*href=["\']\/' . preg_quote($username) . '\/status\/' . preg_quote($tweet_id) . '["\'][^>]*>([^<]+)<\/a>/', $tweet_html, $date_match)) {
-                    $date = trim($date_match[1]);
-                }
-            }
-            
-            // Extract stats - THE SAME METHOD THAT WORKED
-            $likes = 0; $replies = 0; $retweets = 0; $views = 0;
-            
-            // From JSON
-            if (preg_match('/"favorite_count":(\d+)/', $tweet_html, $stats_match)) {
-                $likes = (int)$stats_match[1];
-            }
-            if (preg_match('/"reply_count":(\d+)/', $tweet_html, $stats_match)) {
-                $replies = (int)$stats_match[1];
-            }
-            if (preg_match('/"retweet_count":(\d+)/', $tweet_html, $stats_match)) {
-                $retweets = (int)$stats_match[1];
-            }
-            if (preg_match('/"view_count":"?(\d+)"?/', $tweet_html, $stats_match)) {
-                $views = (int)$stats_match[1];
-            }
-            
-            // Fallback to visible stats
-            if ($likes == 0 && preg_match('/<svg[^>]*icon-heart[^>]*>.*?<\/svg>\s*(?:<[^>]+>)?\s*([\d.]+[kKmM]?)/s', $tweet_html, $stats_match)) {
-                $likes = parseCount($stats_match[1]);
-            }
-            if ($replies == 0 && preg_match('/<svg[^>]*icon-reply[^>]*>.*?<\/svg>\s*(?:<[^>]+>)?\s*([\d.]+[kKmM]?)/s', $tweet_html, $stats_match)) {
-                $replies = parseCount($stats_match[1]);
-            }
-            if ($retweets == 0 && preg_match('/<svg[^>]*icon-retweet[^>]*>.*?<\/svg>\s*(?:<[^>]+>)?\s*([\d.]+[kKmM]?)/s', $tweet_html, $stats_match)) {
-                $retweets = parseCount($stats_match[1]);
-            }
-            if ($views == 0 && preg_match('/<svg[^>]*icon-bar-chart[^>]*>.*?<\/svg>\s*(?:<[^>]+>)?\s*([\d.]+[kKmM]?)/s', $tweet_html, $stats_match)) {
-                $views = parseCount($stats_match[1]);
-            }
-            
-            // Deduplicate
-            $text_key = substr($text, 0, 50);
-            if (in_array($text_key, $seen_texts)) continue;
-            $seen_texts[] = $text_key;
-            
-            $tweets[] = [
-                'id' => $tweet_id,
-                'text' => $text,
-                'url' => "https://x.com/{$username}/status/{$tweet_id}",
-                'date' => $date ?: 'Recent',
-                'timestamp' => $timestamp,
-                'likes' => $likes,
-                'replies' => $replies,
-                'retweets' => $retweets,
-                'views' => $views,
-                'is_pinned' => $is_pinned,
-                'has_image' => false,
-                'has_video' => false
-            ];
         }
     }
     
@@ -262,7 +294,7 @@ function parseTwitterHTML($html, $username) {
     return $data;
 }
 
-// Helper to parse count strings
+// Helper to parse count strings (e.g., "184.2K" -> 184200)
 function parseCount($str) {
     $str = trim($str);
     if (empty($str)) return 0;
@@ -699,27 +731,27 @@ function parseCount($str) {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         return await resp.json();
     }
-    // Replace the render function with this updated version
-function render() {
-    if (accounts.length === 0) {
-        grid.innerHTML = `
-            <div class="empty-state">
-                <h2>No profiles added yet</h2>
-                <p>Enter a Twitter/X username above and click "Add Profile"</p>
-                <p style="margin-top:8px;font-size:13px;color:#536471;">Example: Thenationth, nytimes, BBCNews</p>
-            </div>
-        `;
-        return;
+    
+    function render() {
+        if (accounts.length === 0) {
+            grid.innerHTML = `
+                <div class="empty-state">
+                    <h2>No profiles added yet</h2>
+                    <p>Enter a Twitter/X username above and click "Add Profile"</p>
+                    <p style="margin-top:8px;font-size:13px;color:#536471;">Example: Thenationth, nytimes, BBCNews</p>
+                </div>
+            `;
+            return;
+        }
+        
+        grid.innerHTML = '';
+        accounts.forEach(username => {
+            const box = createBox(username);
+            grid.appendChild(box);
+            loadProfileData(username, box);
+        });
     }
     
-    // Clear the grid completely and only show profile boxes
-    grid.innerHTML = '';
-    accounts.forEach(username => {
-        const box = createBox(username);
-        grid.appendChild(box);
-        loadProfileData(username, box);
-    });
-}
     function createBox(username) {
         const box = document.createElement('div');
         box.className = 'box';
@@ -928,29 +960,27 @@ function render() {
         return div.innerHTML;
     }
     
-// Replace the addAccount function with this:
-function addAccount(username) {
-    username = username.trim().replace(/^@/, '');
-    if (!username) return;
-    if (accounts.includes(username)) {
-        const box = document.querySelector(`.box[data-username="${username}"]`);
-        if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return;
+    function addAccount(username) {
+        username = username.trim().replace(/^@/, '');
+        if (!username) return;
+        if (accounts.includes(username)) {
+            const box = document.querySelector(`.box[data-username="${username}"]`);
+            if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+        }
+        accounts.push(username);
+        saveAccounts();
+        
+        // Remove empty state if it exists
+        const emptyState = grid.querySelector('.empty-state');
+        if (emptyState) emptyState.remove();
+        
+        const box = createBox(username);
+        grid.appendChild(box);
+        loadProfileData(username, box);
+        usernameInput.value = '';
+        usernameInput.focus();
     }
-    accounts.push(username);
-    saveAccounts();
-    
-    // Remove empty state if it exists
-    const emptyState = grid.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-    
-    // Create and add the new box
-    const box = createBox(username);
-    grid.appendChild(box);
-    loadProfileData(username, box);
-    usernameInput.value = '';
-    usernameInput.focus();
-}
     
     function removeAccount(username) {
         accounts = accounts.filter(u => u !== username);
