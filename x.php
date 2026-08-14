@@ -1,10 +1,6 @@
 <?php
 // twitter_proxy.php - Single file Twitter/X profile viewer
 
-// Configuration
-$cache_dir = __DIR__ . '/cache/';
-if (!is_dir($cache_dir)) mkdir($cache_dir, 0755, true);
-
 // Handle AJAX requests
 if (isset($_GET['action'])) {
     header('Content-Type: application/json');
@@ -20,11 +16,6 @@ if (isset($_GET['action'])) {
             exit;
             
         case 'delete_cache':
-            $username = isset($_GET['username']) ? trim($_GET['username']) : '';
-            if ($username) {
-                $cache_file = $cache_dir . md5($username) . '.json';
-                if (file_exists($cache_file)) unlink($cache_file);
-            }
             echo json_encode(['success' => true]);
             exit;
     }
@@ -32,17 +23,9 @@ if (isset($_GET['action'])) {
 
 // Function to fetch profile data
 function fetchProfile($username) {
-    global $cache_dir;
-    
     // Clean username
     $username = preg_replace('/[^a-zA-Z0-9_]/', '', $username);
     if (empty($username)) return ['error' => 'Invalid username'];
-    
-    // Check cache (1 hour TTL)
-    $cache_file = $cache_dir . md5($username) . '.json';
-    if (file_exists($cache_file) && (time() - filemtime($cache_file) < 0)) {
-        return json_decode(file_get_contents($cache_file), true);
-    }
     
     // Fetch the page
     $url = "https://x.com/{$username}";
@@ -72,31 +55,10 @@ function fetchProfile($username) {
     // Parse the HTML
     $data = parseTwitterHTML($html, $username);
     
-    // Cache the result
-    if (!isset($data['error'])) {
-        file_put_contents($cache_file, json_encode($data));
-    }
-    
     return $data;
 }
 
-// Helper function to extract meta values - handles both attribute orders
-function extractMetaValue($html, $property) {
-    $pattern1 = '/<meta\b[^>]*\bitemProp=["\']' . preg_quote($property, '/') . '["\'][^>]*\bcontent=["\'](.*?)["\'][^>]*>/is';
-    $pattern2 = '/<meta\b[^>]*\bcontent=["\'](.*?)["\'][^>]*\bitemProp=["\']' . preg_quote($property, '/') . '["\'][^>]*>/is';
-
-    if (preg_match($pattern1, $html, $m)) {
-        return html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-    }
-
-    if (preg_match($pattern2, $html, $m)) {
-        return html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-    }
-
-    return '';
-}
-
-// Parse Twitter/X HTML using schema.org metadata
+// Parse Twitter/X HTML
 function parseTwitterHTML($html, $username) {
     $data = [
         'username' => $username,
@@ -114,55 +76,36 @@ function parseTwitterHTML($html, $username) {
         'error' => null
     ];
     
-    // Extract profile info using regex patterns
-    
-    // Name - from og:title or title tag
+    // Extract profile info
     if (preg_match('/<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
         $data['name'] = trim(str_replace(['(@' . $username . ')', ' on X'], '', $matches[1]));
-    } elseif (preg_match('/<title>([^<]+)<\/title>/', $html, $matches)) {
-        $data['name'] = trim(str_replace(['(@' . $username . ')', ' / X'], '', $matches[1]));
     }
     
-    // Bio/Description
     if (preg_match('/<meta\s+name=["\']description["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
         $data['bio'] = html_entity_decode(trim($matches[1]));
-    } elseif (preg_match('/<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
-        $data['bio'] = html_entity_decode(trim($matches[1]));
     }
     
-    // Avatar
     if (preg_match('/<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+_200x200[^"\']*)["\']/i', $html, $matches)) {
         $data['avatar'] = str_replace('_200x200', '_400x400', $matches[1]);
-    } elseif (preg_match('/<img[^>]+src=["\']([^"\']+_400x400[^"\']*)["\']/i', $html, $matches)) {
-        $data['avatar'] = $matches[1];
     }
     
-    // Banner
     if (preg_match('/<meta\s+name=["\']twitter:image["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
         $data['banner'] = $matches[1];
     }
     
-    // Location
     if (preg_match('/<svg[^>]*icon-location[^>]*>.*?<\/svg>\s*<[^>]+>([^<]+)<\/[^>]+>/s', $html, $matches)) {
         $data['location'] = trim($matches[1]);
     }
     
-    // URL/Website
     if (preg_match('/<svg[^>]*icon-link[^>]*>.*?<\/svg>\s*<a[^>]+href=["\']([^"\']+)["\'][^>]*>/s', $html, $matches)) {
         $data['url'] = $matches[1];
     }
     
-    // Joined date
     if (preg_match('/<svg[^>]*icon-calendar[^>]*>.*?<\/svg>\s*<[^>]+>Joined\s+([^<]+)<\/[^>]+>/s', $html, $matches)) {
         $data['joined'] = trim($matches[1]);
     }
     
-    // Extract stats from meta tags
-    if (preg_match('/<meta\s+name=["\']twitter:data1["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
-        $data['posts'] = parseCount($matches[1]);
-    }
-    
-    // Extract followers/following from JSON
+    // Extract followers/following/posts from JSON
     if (preg_match('/"followers_count":(\d+)/', $html, $matches)) {
         $data['followers'] = (int)$matches[1];
     }
@@ -173,119 +116,153 @@ function parseTwitterHTML($html, $username) {
         $data['posts'] = (int)$matches[1];
     }
     
-    // Extract tweets using schema.org metadata
+    // Also try meta tags for posts count
+    if ($data['posts'] == 0 && preg_match('/<meta\s+name=["\']twitter:data1["\']\s+content=["\']([^"\']+)["\']/i', $html, $matches)) {
+        $data['posts'] = parseCount($matches[1]);
+    }
+    
+    // Extract tweets
     $tweets = [];
     $seen_texts = [];
-   // Extract tweets - FIXED VERSION// Extract tweets - FIXED for full text
-if (preg_match_all('/<article[^>]*data-tweet-id=["\']([^"\']+)["\'][^>]*>(.*?)<\/article>/s', $html, $matches, PREG_SET_ORDER)) {
-    foreach ($matches as $match) {
-        $tweet_id = $match[1];
-        $tweet_html = $match[0];
-        
-        // Extract FULL text from note_tweet first
-        $text = '';
-        
-        // Method 1: Get full text from note_tweet
-        if (preg_match('/"note_text":"((?:\\\\.|[^"\\\\])*)"/s', $tweet_html, $text_match)) {
-            $text = str_replace(['\\n', '\\"', '\\u0026', '\\u2019', '\\u201c', '\\u201d', '\\u002F'], ["\n", '"', '&', "'", '"', '"', '/'], $text_match[1]);
+    
+    if (preg_match_all('/<article[^>]*data-tweet-id=["\']([^"\']+)["\'][^>]*>(.*?)<\/article>/s', $html, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $match) {
+            $tweet_id = $match[1];
+            $tweet_html = $match[0];
+            
+            // Extract FULL text - try multiple methods// Extract FULL text
+$text = '';
+
+$details_key = 'client:' . base64_encode('Tweet:' . $tweet_id) . ':details';
+
+$details_pos = strpos($html, $details_key);
+
+if ($details_pos !== false) {
+
+    // The full_text field is immediately after the details object.
+    // Only inspect a limited section to avoid huge regex searches.
+    $details_chunk = substr($html, $details_pos, 10000);
+
+    if (preg_match(
+        '/full_text:"((?:\\\\.|[^"\\\\])*)"/s',
+        $details_chunk,
+        $text_match
+    )) {
+        $decoded = json_decode('"' . $text_match[1] . '"');
+
+        if ($decoded !== null || json_last_error() === JSON_ERROR_NONE) {
+            $text = $decoded;
+        } else {
+            $text = $text_match[1];
         }
-        // Method 2: Get full_text from JSON
-        elseif (preg_match('/"full_text":"([^"]+)"/', $tweet_html, $text_match)) {
-            $text = str_replace(['\\n', '\\"', '\\u0026', '\\u2019', '\\u201c', '\\u201d', '\\u002F'], ["\n", '"', '&', "'", '"', '"', '/'], $text_match[1]);
-        }
-        // Method 3: Fallback to articleBody
-        else {
-            if (preg_match('/<meta\s+content="([^"]*)"\s+itemProp="articleBody"/i', $tweet_html, $text_match)) {
-                $text = html_entity_decode($text_match[1], ENT_QUOTES, 'UTF-8');
-            }
-        }
-        
-        if (empty($text)) continue;
-        
-        // Extract date
-        $date = '';
-        $timestamp = 0;
-        if (preg_match('/<meta\s+content="([^"]*)"\s+itemProp="datePublished"/i', $tweet_html, $date_match)) {
-            $timestamp = strtotime($date_match[1]);
-            if ($timestamp !== false && $timestamp > 0) {
-                $date = date('M j, Y g:i A', $timestamp);
-            }
-        }
-        
-        // Extract stats
-        $likes = 0; $replies = 0; $retweets = 0; $views = 0;
-        
-        // From JSON
-        if (preg_match('/"favorite_count":(\d+)/', $tweet_html, $stats_match)) {
-            $likes = (int)$stats_match[1];
-        }
-        if (preg_match('/"reply_count":(\d+)/', $tweet_html, $stats_match)) {
-            $replies = (int)$stats_match[1];
-        }
-        if (preg_match('/"retweet_count":(\d+)/', $tweet_html, $stats_match)) {
-            $retweets = (int)$stats_match[1];
-        }
-        if (preg_match('/"view_count":"?(\d+)"?/', $tweet_html, $stats_match)) {
-            $views = (int)$stats_match[1];
-        }
-        
-        // Check if pinned
-        $is_pinned = strpos($tweet_html, 'Pinned') !== false || 
-                    strpos($tweet_html, '"context_type":"Pin"') !== false;
-        
-        $tweets[] = [
-            'id' => $tweet_id,
-            'text' => $text,
-            'url' => "https://x.com/{$username}/status/{$tweet_id}",
-            'date' => $date ?: 'Recent',
-            'timestamp' => $timestamp,
-            'likes' => $likes,
-            'replies' => $replies,
-            'retweets' => $retweets,
-            'views' => $views,
-            'is_pinned' => $is_pinned,
-            'has_image' => false,
-            'has_video' => false
-        ];
     }
 }
-    
-    // If no tweets from HTML, try JSON fallback
-    if (empty($tweets)) {
-        if (preg_match_all('/"full_text":"([^"]+)"/', $html, $matches)) {
-            preg_match_all('/"created_at":"([^"]+)"/', $html, $date_matches);
-            preg_match_all('/"favorite_count":(\d+)/', $html, $like_matches);
-            preg_match_all('/"reply_count":(\d+)/', $html, $reply_matches);
-            preg_match_all('/"retweet_count":(\d+)/', $html, $retweet_matches);
+
+// Fallback to articleBody
+if (empty($text)) {
+    if (preg_match(
+        '/<meta\s+content="([^"]*)"\s+itemProp="articleBody"/i',
+        $tweet_html,
+        $text_match
+    )) {
+        $text = html_entity_decode(
+            $text_match[1],
+            ENT_QUOTES | ENT_HTML5,
+            'UTF-8'
+        );
+    }
+}
+
+// Fallback to visible text
+if (empty($text)) {
+    if (preg_match(
+        '/<div[^>]*dir=["\']auto["\'][^>]*>(.*?)<\/div>/s',
+        $tweet_html,
+        $text_match
+    )) {
+        $text = trim(strip_tags(
+            html_entity_decode(
+                $text_match[1],
+                ENT_QUOTES | ENT_HTML5,
+                'UTF-8'
+            )
+        ));
+    }
+}
             
-            foreach ($matches[1] as $i => $text) {
-                if (strlen($text) > 20) {
-                    $date = 'Recent';
-                    $timestamp = 0;
-                    if (isset($date_matches[1][$i])) {
-                        $ts = strtotime($date_matches[1][$i]);
-                        if ($ts !== false && $ts > 0) {
-                            $timestamp = $ts;
-                            $date = date('M j, Y g:i A', $ts);
-                        }
-                    }
-                    
-                    $tweets[] = [
-                        'id' => 'json_' . ($i + 1),
-                        'text' => str_replace(['\\n', '\\"', '\\u0026', '\\u2019'], ["\n", '"', '&', "'"], $text),
-                        'url' => "https://x.com/{$username}",
-                        'date' => $date,
-                        'timestamp' => $timestamp,
-                        'likes' => isset($like_matches[1][$i]) ? (int)$like_matches[1][$i] : 0,
-                        'replies' => isset($reply_matches[1][$i]) ? (int)$reply_matches[1][$i] : 0,
-                        'retweets' => isset($retweet_matches[1][$i]) ? (int)$retweet_matches[1][$i] : 0,
-                        'views' => 0,
-                        'is_pinned' => false,
-                        'has_image' => false,
-                        'has_video' => false
-                    ];
+            // Check if pinned
+            $is_pinned = strpos($tweet_html, 'Pinned') !== false || 
+                        strpos($tweet_html, '"context_type":"Pin"') !== false ||
+                        strpos($tweet_html, 'pin-fill') !== false;
+            
+            // Extract date
+            $date = '';
+            $timestamp = 0;
+            
+            // Try time tag first
+            if (preg_match('/<time[^>]*datetime=["\']([^"\']+)["\']/i', $tweet_html, $date_match)) {
+                $timestamp = strtotime($date_match[1]);
+                if ($timestamp !== false && $timestamp > 0) {
+                    $date = date('M j, Y g:i A', $timestamp);
                 }
             }
+            // Try datePublished meta
+            if (empty($date) && preg_match('/<meta\s+content="([^"]*)"\s+itemProp="datePublished"/i', $tweet_html, $date_match)) {
+                $timestamp = strtotime($date_match[1]);
+                if ($timestamp !== false && $timestamp > 0) {
+                    $date = date('M j, Y g:i A', $timestamp);
+                }
+            }
+            
+            // Extract stats - from JSON
+            $likes = 0; $replies = 0; $retweets = 0; $views = 0;
+            
+            if (preg_match('/"favorite_count":(\d+)/', $tweet_html, $stats_match)) {
+                $likes = (int)$stats_match[1];
+            }
+            if (preg_match('/"reply_count":(\d+)/', $tweet_html, $stats_match)) {
+                $replies = (int)$stats_match[1];
+            }
+            if (preg_match('/"retweet_count":(\d+)/', $tweet_html, $stats_match)) {
+                $retweets = (int)$stats_match[1];
+            }
+            if (preg_match('/"view_count":"?(\d+)"?/', $tweet_html, $stats_match)) {
+                $views = (int)$stats_match[1];
+            }
+            
+            // Also try from schema.org meta
+            if ($likes == 0 && preg_match('/<meta\s+content="(\d+)"\s+itemProp="userInteractionCount"[^>]*>.*?LikeAction/s', $tweet_html, $stats_match)) {
+                $likes = (int)$stats_match[1];
+            }
+            if ($replies == 0 && preg_match('/<meta\s+content="(\d+)"\s+itemProp="userInteractionCount"[^>]*>.*?ReplyAction/s', $tweet_html, $stats_match)) {
+                $replies = (int)$stats_match[1];
+            }
+            if ($retweets == 0 && preg_match('/<meta\s+content="(\d+)"\s+itemProp="userInteractionCount"[^>]*>.*?ShareAction/s', $tweet_html, $stats_match)) {
+                $retweets = (int)$stats_match[1];
+            }
+            if ($views == 0 && preg_match('/<meta\s+content="(\d+)"\s+itemProp="userInteractionCount"[^>]*>.*?ViewAction/s', $tweet_html, $stats_match)) {
+                $views = (int)$stats_match[1];
+            }
+            
+            // Deduplicate
+            $text_key = substr($text, 0, 50);
+            if (in_array($text_key, $seen_texts)) continue;
+            $seen_texts[] = $text_key;
+            
+            $tweets[] = [
+                'id' => $tweet_id,
+                'text' => $text,
+                'url' => "https://x.com/{$username}/status/{$tweet_id}",
+                'date' => $date ?: 'Recent',
+                'timestamp' => $timestamp,
+                'likes' => $likes,
+                'replies' => $replies,
+                'retweets' => $retweets,
+                'views' => $views,
+                'is_pinned' => $is_pinned,
+                'has_image' => false,
+                'has_video' => false
+            ];
         }
     }
     
@@ -294,7 +271,7 @@ if (preg_match_all('/<article[^>]*data-tweet-id=["\']([^"\']+)["\'][^>]*>(.*?)<\
     return $data;
 }
 
-// Helper to parse count strings (e.g., "184.2K" -> 184200)
+// Helper to parse count strings
 function parseCount($str) {
     $str = trim($str);
     if (empty($str)) return 0;
@@ -726,11 +703,20 @@ function parseCount($str) {
         } catch (e) {}
     }
     
-    async function fetchProfile(username) {
-        const resp = await fetch(`?action=fetch&username=${encodeURIComponent(username)}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return await resp.json();
+async function fetchProfile(username) {
+    const resp = await fetch(`?action=fetch&username=${encodeURIComponent(username)}`);
+    const raw = await resp.text();
+
+    console.log("SERVER RESPONSE:", raw);
+
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    try {
+        return JSON.parse(raw);
+    } catch (e) {
+        throw new Error("PHP returned non-JSON: " + raw.substring(0, 500));
     }
+}
     
     function render() {
         if (accounts.length === 0) {
@@ -1009,7 +995,6 @@ function parseCount($str) {
         for (const username of accounts) {
             const box = document.querySelector(`.box[data-username="${username}"]`);
             if (box) {
-                await fetch(`?action=delete_cache&username=${encodeURIComponent(username)}`);
                 await loadProfileData(username, box);
             }
             await new Promise(r => setTimeout(r, 500));
